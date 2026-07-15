@@ -1,0 +1,40 @@
+{
+  "name": "railoptima",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "server": "tsx server.ts",
+    "start": "concurrently \"npm run dev\" \"npm run server\""
+  },
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "@google/generative-ai": "^0.24.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "framer-motion": "^11.3.31",
+    "gsap": "^3.15.0",
+    "lucide-react": "^0.446.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "recharts": "^2.12.7",
+    "tailwindcss": "^4.3.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.5",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.2"
+  }
+}
