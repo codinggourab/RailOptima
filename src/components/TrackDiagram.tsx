@@ -4,7 +4,7 @@
 // @ts-nocheck
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BrainCircuit, Clock, AlertTriangle, TrainFront, Settings2, CheckCircle, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Radio, Unlock } from 'lucide-react';
+import { BrainCircuit, Clock, AlertTriangle, TrainFront, Settings2, CheckCircle, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Radio, Unlock, Trash2 } from 'lucide-react';
 // import { GoogleGenAI } from '@google/genai';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend } from 'recharts';
 import { WalkieTalkie } from './WalkieTalkie';
@@ -68,46 +68,7 @@ interface Train {
   hasHalted?: boolean;
   hasRequestedClearance?: boolean;
   pathHistory?: {x: number, y: number, switchId?: string}[];
-  dispatchMethod?: 'manual' | 'ai';
-  dispatchedAt?: number;
 }
-
-// --- Manual vs AI Optimization session stats -------------------------------
-// Tracked independently for trains dispatched manually (via the dropdown /
-// direct dispatch UI) vs trains dispatched by the AI (auto-applied actions or
-// the "Dispatch" button inside an AI recommendation). Persisted so the AI
-// Optimization tab can read and compare them.
-interface OptimizationStats {
-  dispatched: number;
-  passed: number;          // trains that completed their run (left the network)
-  totalDelayTicks: number; // sum of delayTicks across all completed trains
-  sessionStartAt: number;
-  lastUpdateAt: number;
-}
-
-const DEFAULT_OPT_STATS = (): OptimizationStats => ({
-  dispatched: 0,
-  passed: 0,
-  totalDelayTicks: 0,
-  sessionStartAt: Date.now(),
-  lastUpdateAt: Date.now(),
-});
-
-const MANUAL_STATS_KEY = 'railoptima_manual_stats_v1';
-const AI_STATS_KEY = 'railoptima_ai_stats_v1';
-const COMPARISON_KEY = 'railoptima_optimization_comparison_v1';
-const RESET_EVENT = 'railoptima:reset-optimization-stats';
-
-const loadOptStats = (key: string): OptimizationStats => {
-  try {
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      return { ...DEFAULT_OPT_STATS(), ...parsed };
-    }
-  } catch (_) {}
-  return DEFAULT_OPT_STATS();
-};
 
 interface ApproachingTrain {
   id: string;
@@ -509,6 +470,18 @@ export const generateInitialSignals = (): Record<string, SignalDef> => {
   delete sigs['9-S2-D'];
   delete sigs['9-S4-U'];
 
+  // Renumber track-2 signals: 2-S2 was removed just above, leaving a gap
+  // (2-S1, 2-S3, 2-S4). Shift the remaining two down to close the gap:
+  // former 2-S3 -> 2-S2, former 2-S4 -> 2-S3.
+  if (sigs['2-S3']) {
+    sigs['2-S2'] = { ...sigs['2-S3'], id: '2-S2', type: 'S2' };
+    delete sigs['2-S3'];
+  }
+  if (sigs['2-S4']) {
+    sigs['2-S3'] = { ...sigs['2-S4'], id: '2-S3', type: 'S3' };
+    delete sigs['2-S4'];
+  }
+
   // Add signals for both directions on line 4 (UP-CCR) in between SW-7TO4-CO and SW-X-7-8
   sigs['4-S5-U'] = { id: '4-S5-U', trackId: 4, x: 1585, type: 'S5', state: 'red', direction: 'up' };
   sigs['4-S5-D'] = { id: '4-S5-D', trackId: 4, x: 1750, type: 'S5', state: 'red', direction: 'down' };
@@ -521,9 +494,9 @@ export const generateInitialSignals = (): Record<string, SignalDef> => {
     sigs['4-S3-U'].x = 1000;
   }
 
-  // Shift the signal 2-S3 slightly towards the right side
-  if (sigs['2-S3']) {
-    sigs['2-S3'].x = 1100;
+  // Shift the signal 2-S2 (formerly 2-S3) slightly towards the right side
+  if (sigs['2-S2']) {
+    sigs['2-S2'].x = 1100;
   }
 
   // Shift signal 7-S1-D to the right side of switch LAD-DN-4B on the DN-CCR line
@@ -821,7 +794,7 @@ const SEALDAH_MAIN_LINE_CITIES = [
 const SEALDAH_BONGAON_LINE_CITIES = [
   'bangaon', 'bongaon', 'barasat', 'duttapukur', 'dattapukur',
   'thakurnagar', 'madhyamgram', 'habra', 'dum dum cant', 'hasanabad',
-  'hasnabad', 'gobardanga',
+  'hasnabad', 'gobardanga', 'gobardaga',
 ];
 
 type SealdahUpCorridor = 'MAIN' | 'BONGAON' | null;
@@ -1169,13 +1142,7 @@ const analyzeRailwayState = (
   // into COMMON GOODS 1 (Track 6) — goods services default to the goods line.
   // ══════════════════════════════════════════════════════════════════════════
   const UP_CCR_LEFT_ZONE_X = 700; // band around SW-5TO4-L (600-630) / SW-6TO5-L (630-660)
-  const upCCRLeftTrains = trains.filter(t =>
-    t.trackId === 4 && t.x <= UP_CCR_LEFT_ZONE_X &&
-    // UP Bongaon-corridor trains on Track 4 get their own dedicated routing
-    // to Platform 4 / UP BONGAON below (STEP 0E) — don't let this generic
-    // goods/loop diversion grab them first.
-    !(t.direction === 'up' && classifySealdahUpCorridor(t.name) === 'BONGAON')
-  );
+  const upCCRLeftTrains = trains.filter(t => t.trackId === 4 && t.x <= UP_CCR_LEFT_ZONE_X);
 
   upCCRLeftTrains.forEach(t => {
     const label = `${t.id} (${t.name.substring(0, 18)})`;
@@ -1217,126 +1184,101 @@ const analyzeRailwayState = (
   });
 
   // ══════════════════════════════════════════════════════════════════════════
-  // STEP 0D: UP BONGAON CORRIDOR — LADDER CROSSOVER FROM PF1 / PF3
-  // Bongaon/Barasat/Duttapukur/Thakurnagar/Madhyamgram/Habra/Dum Dum Cantt/
-  // Gobardanga/Hasnabad services depart Sealdah on Track 1 or Track 3. Once
-  // clear of the platform they must cascade across the full ladder —
-  // SW-LAD-DN-1 → 2 → 3 → 4 → 4B → 5 — to reach UP BONGAON (Track 10).
+  // STEP 0D: SEALDAH CORRIDOR DIRECTIONAL ROUTING (MAIN vs BONGAON)
+  // Implements the exact interlocking sequences for the two Sealdah UP
+  // suburban corridors, in both directions:
+  //
+  //  MAIN corridor (Dankuni/Ranaghat/Krishnanagar/Shantipur/Lalgola/Kalyani
+  //  Simanta/Naihati/Jangipur Road/Gede) — DOWN arrival into Sealdah:
+  //    • via DN SUBURBAN (Track 2)  → runs straight into PF2, no diversion.
+  //    • via DN CCR (Track 7)      → ladder across LAD-DN-4B → LAD-DN-4 →
+  //      LAD-DN-3 → LAD-DN-2 onto PF2 (Track 2), then departs left toward
+  //      Sealdah.
+  //
+  //  BONGAON corridor (Bongaon/Barasat/Duttapukur/Thakurnagar/Madhyamgram/
+  //  Habra/Dum Dum Cantt/Hasnabad/Gobardanga):
+  //    UP departure from Sealdah:
+  //      • from PF1/PF3 (Track 1/3) → full ladder LAD-DN-1 → LAD-DN-2 →
+  //        LAD-DN-3 → LAD-DN-4 → LAD-DN-4B → LAD-DN-5 onto UP BONGAON
+  //        (Track 10).
+  //      • from UP CCR (Track 4)    → loop chain SW-5TO4-L → SW-6TO5-L →
+  //        SW-7TO6-L → SW-8TO7-L into PF4 (Track 8), then onward to
+  //        UP BONGAON.
+  //    DOWN arrival from DN BONGAON (Track 9 / PF5) toward Sealdah:
+  //      • departing PF5           → SW-9TO8-L → SW-5TO4-L → SW-6TO5-L →
+  //        SW-7TO6-L → SW-8TO7-L.
+  //      • departing PF4 (Track 8) → SW-8TO7-L → SW-7TO6-L → SW-6TO5-L →
+  //        SW-5TO4-L.
   // ══════════════════════════════════════════════════════════════════════════
-  const LADDER_SWITCHES: string[] = [
-    'SW-LAD-DN-1', 'SW-LAD-DN-2', 'SW-LAD-DN-3', 'SW-LAD-DN-4', 'SW-LAD-DN-4B', 'SW-LAD-DN-5',
-  ];
-  const LADDER_ENTRY_X = STATION_KNOWLEDGE.platformZone.maxX; // 1500 — just ahead of SW-LAD-DN-1 (starts 1550)
 
-  const upBongaonLadderTrains = trains.filter(t =>
-    t.direction === 'up' && (t.trackId === 1 || t.trackId === 3) &&
-    t.x >= LADDER_ENTRY_X && classifySealdahUpCorridor(t.name) === 'BONGAON'
-  );
+  trains.forEach(t => {
+    const corridor = classifySealdahUpCorridor(t.name);
+    if (!corridor) return;
+    const label = `${t.id} (${t.name.substring(0, 22)})`;
 
-  if (upBongaonLadderTrains.length > 0) {
-    upBongaonLadderTrains.forEach(t => {
-      const label = `${t.id} (${t.name.substring(0, 18)})`;
-      diversionSuggestions.push(
-        `🪜 LADDER: ${label} [UP BONGAON CORRIDOR, ex-Track ${t.trackId}] → UP BONGAON (Track 10) ` +
-        `cascading via SW-LAD-DN-1→2→3→4→4B→5`
-      );
-    });
-    LADDER_SWITCHES.forEach(swId => pushSwitchAction(
-      swId, 'diverging',
-      `Set ${swId} → DIVERGING: Cascade UP BONGAON corridor train(s) along the ladder toward UP BONGAON (Track 10)`
-    ));
-  } else {
-    // No Bongaon-corridor train needs the ladder right now — release it back to
-    // STRAIGHT so a following MAIN-corridor train on Track 1/3 (which runs the
-    // full length of the track and would otherwise be mis-routed onto Track 10
-    // by a stale DIVERGING switch) passes straight through.
-    LADDER_SWITCHES.forEach(swId => {
-      if (switches[swId]?.state === 'diverging') {
-        pushSwitchAction(swId, 'straight', `Set ${swId} → STRAIGHT: No UP BONGAON corridor train on the ladder — keep it clear for MAIN corridor traffic`);
+    // ── MAIN corridor — DOWN arrival into Sealdah ───────────────────────────
+    if (corridor === 'MAIN') {
+      if (t.trackId === 7) {
+        diversionSuggestions.push(
+          `🔀 DIVERT: ${label} [MAIN corridor, DN CCR] → PF2 (DN SUBURBAN, Track 2) ` +
+          `via ladder LAD-DN-4B → LAD-DN-4 → LAD-DN-3 → LAD-DN-2, then departs left toward Sealdah`
+        );
+        pushSwitchAction('SW-LAD-DN-4B', 'diverging', `Set SW-LAD-DN-4B → DIVERGING: Open ladder for ${label} off DN CCR (Track 7)`);
+        pushSwitchAction('SW-LAD-DN-4', 'diverging', `Set SW-LAD-DN-4 → DIVERGING: Route ${label} toward Track 4`);
+        pushSwitchAction('SW-LAD-DN-3', 'diverging', `Set SW-LAD-DN-3 → DIVERGING: Route ${label} toward Track 3`);
+        pushSwitchAction('SW-LAD-DN-2', 'diverging', `Set SW-LAD-DN-2 → DIVERGING: Route ${label} onto PF2 (Track 2)`);
+      } else if (t.trackId === 2) {
+        diversionSuggestions.push(
+          `➡️ ${label} [MAIN corridor, DN SUBURBAN] runs straight into PF2 — no diversion needed`
+        );
       }
-    });
-  }
+    }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // STEP 0E: UP BONGAON CORRIDOR VIA UP CCR (Track 4) → PLATFORM 4 → TRACK 10
-  // A Bongaon-corridor service running non-stop on UP CCR (Track 4) diverts
-  // near the left-side loop crossover (SW-5TO4-L → 6TO5-L → 7TO6-L → 8TO7-L)
-  // onto Platform 4 (Track 8), then rides Track 8 out to SW-LAD-DN-5 to reach
-  // UP BONGAON (Track 10).
-  // ══════════════════════════════════════════════════════════════════════════
-  const UP_CCR_BONGAON_SWITCHES: string[] = ['SW-5TO4-L', 'SW-6TO5-L', 'SW-7TO6-L', 'SW-8TO7-L'];
-  const upCCRBongaonTrains = trains.filter(t =>
-    t.direction === 'up' && t.trackId === 4 && t.x <= UP_CCR_LEFT_ZONE_X &&
-    classifySealdahUpCorridor(t.name) === 'BONGAON'
-  );
+    // ── BONGAON corridor — UP departure from Sealdah ────────────────────────
+    if (corridor === 'BONGAON') {
+      if ((t.trackId === 1 || t.trackId === 3) && t.direction === 'up') {
+        diversionSuggestions.push(
+          `🔀 DIVERT: ${label} [BONGAON corridor, PF${t.trackId === 1 ? '1' : '3'}] → UP BONGAON (Track 10) ` +
+          `via full ladder LAD-DN-1 → LAD-DN-2 → LAD-DN-3 → LAD-DN-4 → LAD-DN-4B → LAD-DN-5`
+        );
+        pushSwitchAction('SW-LAD-DN-1', 'diverging', `Set SW-LAD-DN-1 → DIVERGING: Start ladder crossover for ${label} off Track ${t.trackId}`);
+        pushSwitchAction('SW-LAD-DN-2', 'diverging', `Set SW-LAD-DN-2 → DIVERGING: Route ${label} toward Track 3`);
+        pushSwitchAction('SW-LAD-DN-3', 'diverging', `Set SW-LAD-DN-3 → DIVERGING: Route ${label} toward Track 4`);
+        pushSwitchAction('SW-LAD-DN-4', 'diverging', `Set SW-LAD-DN-4 → DIVERGING: Route ${label} toward Track 7`);
+        pushSwitchAction('SW-LAD-DN-4B', 'diverging', `Set SW-LAD-DN-4B → DIVERGING: Route ${label} toward Track 8`);
+        pushSwitchAction('SW-LAD-DN-5', 'diverging', `Set SW-LAD-DN-5 → DIVERGING: Route ${label} onto UP BONGAON (Track 10)`);
+      } else if (t.trackId === 4 && t.direction === 'up') {
+        diversionSuggestions.push(
+          `🔀 DIVERT: ${label} [BONGAON corridor, UP CCR] → PF4 (DN MAIN, Track 8) ` +
+          `via loop chain SW-5TO4-L → SW-6TO5-L → SW-7TO6-L → SW-8TO7-L, then onward to UP BONGAON`
+        );
+        pushSwitchAction('SW-5TO4-L', 'diverging', `Set SW-5TO4-L → DIVERGING: Start loop chain for ${label} off UP CCR (Track 4)`);
+        pushSwitchAction('SW-6TO5-L', 'diverging', `Set SW-6TO5-L → DIVERGING: Route ${label} toward Track 6`);
+        pushSwitchAction('SW-7TO6-L', 'diverging', `Set SW-7TO6-L → DIVERGING: Route ${label} toward Track 7`);
+        pushSwitchAction('SW-8TO7-L', 'diverging', `Set SW-8TO7-L → DIVERGING: Route ${label} onto PF4 (Track 8)`);
+      }
 
-  upCCRBongaonTrains.forEach(t => {
-    const label = `${t.id} (${t.name.substring(0, 18)})`;
-    diversionSuggestions.push(
-      `🔀 DIVERT: ${label} [UP CCR → PLATFORM 4] → UP BONGAON (Track 10) ` +
-      `via SW-5TO4-L→6TO5-L→7TO6-L→8TO7-L, then SW-LAD-DN-5`
-    );
-    UP_CCR_BONGAON_SWITCHES.forEach(swId => pushSwitchAction(
-      swId, 'diverging',
-      `Set ${swId} → DIVERGING: Route ${label} from UP CCR (Track 4) to Platform 4 (Track 8)`
-    ));
-    pushSwitchAction(
-      'SW-LAD-DN-5', 'diverging',
-      `Set SW-LAD-DN-5 → DIVERGING: Continue ${label} from Platform 4 (Track 8) onward to UP BONGAON (Track 10)`
-    );
-  });
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // STEP 0F: UP MAIN CORRIDOR ARRIVAL — DN CCR (Track 7) → LADDER → PLATFORM 2
-  // Dankuni/Ranaghat/Krishnanagar/Shantipur/Lalgola/Kalyani Simanta/Naihati/
-  // Jangipur Road/Gede DOWN services arriving on DN CCR (Track 7) ladder
-  // across via SW-LAD-DN-4B → 4 → 3 → 2 to reach Platform 2 (Track 2) before
-  // departing back towards Sealdah.
-  // ══════════════════════════════════════════════════════════════════════════
-  const DN_MAIN_LADDER_SWITCHES: string[] = ['SW-LAD-DN-4B', 'SW-LAD-DN-4', 'SW-LAD-DN-3', 'SW-LAD-DN-2'];
-  const dnMainCCRTrains = trains.filter(t =>
-    t.direction === 'down' && t.trackId === 7 &&
-    t.x >= 1550 && t.x <= 2900 &&
-    classifySealdahUpCorridor(t.name) === 'MAIN'
-  );
-
-  dnMainCCRTrains.forEach(t => {
-    const label = `${t.id} (${t.name.substring(0, 18)})`;
-    diversionSuggestions.push(
-      `🪜 LADDER: ${label} [DN CCR → PLATFORM 2] via SW-LAD-DN-4B→4→3→2`
-    );
-    DN_MAIN_LADDER_SWITCHES.forEach(swId => pushSwitchAction(
-      swId, 'diverging',
-      `Set ${swId} → DIVERGING: Route ${label} from DN CCR (Track 7) toward Platform 2 (Track 2)`
-    ));
-  });
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // STEP 0G: UP BONGAON CORRIDOR DOWN DEPARTURE — PF5 / PF4 → UP CCR → SEALDAH
-  // A Bongaon-corridor DOWN service that halted at Platform 5 (Track 9) or
-  // Platform 4 (Track 8) rejoins the running lines toward Sealdah:
-  //   ex-PF5: SW-9TO8-L → 5TO4-L → 6TO5-L → 7TO6-L → 8TO7-L
-  //   ex-PF4: SW-8TO7-L → 7TO6-L → 6TO5-L → 5TO4-L
-  // ══════════════════════════════════════════════════════════════════════════
-  const dnBongaonDepartTrains = trains.filter(t =>
-    t.direction === 'down' && classifySealdahUpCorridor(t.name) === 'BONGAON' &&
-    ((t.trackId === 9 && t.x <= 950 && t.x > 700) || (t.trackId === 8 && t.x <= 950 && t.x > 650))
-  );
-
-  dnBongaonDepartTrains.forEach(t => {
-    const label = `${t.id} (${t.name.substring(0, 18)})`;
-    if (t.trackId === 9) {
-      diversionSuggestions.push(`🪜 LADDER: ${label} [ex-PLATFORM 5 → SEALDAH] via SW-9TO8-L→5TO4-L→6TO5-L→7TO6-L→8TO7-L`);
-      ['SW-9TO8-L', 'SW-5TO4-L', 'SW-6TO5-L', 'SW-7TO6-L', 'SW-8TO7-L'].forEach(swId => pushSwitchAction(
-        swId, 'diverging',
-        `Set ${swId} → DIVERGING: Route ${label} off Platform 5 (Track 9), back toward UP CCR / Sealdah`
-      ));
-    } else {
-      diversionSuggestions.push(`🪜 LADDER: ${label} [ex-PLATFORM 4 → SEALDAH] via SW-8TO7-L→7TO6-L→6TO5-L→5TO4-L`);
-      ['SW-8TO7-L', 'SW-7TO6-L', 'SW-6TO5-L', 'SW-5TO4-L'].forEach(swId => pushSwitchAction(
-        swId, 'diverging',
-        `Set ${swId} → DIVERGING: Route ${label} off Platform 4 (Track 8), back toward UP CCR / Sealdah`
-      ));
+      // ── BONGAON corridor — DOWN arrival from DN BONGAON toward Sealdah ────
+      if (t.trackId === 9) {
+        diversionSuggestions.push(
+          `🔀 DIVERT: ${label} [BONGAON corridor, departing PF5] → Sealdah ` +
+          `via SW-9TO8-L → SW-5TO4-L → SW-6TO5-L → SW-7TO6-L → SW-8TO7-L`
+        );
+        pushSwitchAction('SW-9TO8-L', 'diverging', `Set SW-9TO8-L → DIVERGING: Bring ${label} off PLATFORM 5 (Track 9) onto Track 8`);
+        pushSwitchAction('SW-5TO4-L', 'diverging', `Set SW-5TO4-L → DIVERGING: Align loop chain for ${label}`);
+        pushSwitchAction('SW-6TO5-L', 'diverging', `Set SW-6TO5-L → DIVERGING: Align loop chain for ${label}`);
+        pushSwitchAction('SW-7TO6-L', 'diverging', `Set SW-7TO6-L → DIVERGING: Align loop chain for ${label}`);
+        pushSwitchAction('SW-8TO7-L', 'diverging', `Set SW-8TO7-L → DIVERGING: Complete route for ${label} toward Sealdah`);
+      } else if (t.trackId === 8 && t.direction === 'down') {
+        diversionSuggestions.push(
+          `🔀 DIVERT: ${label} [BONGAON corridor, departing PF4] → Sealdah ` +
+          `via SW-8TO7-L → SW-7TO6-L → SW-6TO5-L → SW-5TO4-L`
+        );
+        pushSwitchAction('SW-8TO7-L', 'diverging', `Set SW-8TO7-L → DIVERGING: Start route for ${label} off PLATFORM 4 (Track 8)`);
+        pushSwitchAction('SW-7TO6-L', 'diverging', `Set SW-7TO6-L → DIVERGING: Align loop chain for ${label}`);
+        pushSwitchAction('SW-6TO5-L', 'diverging', `Set SW-6TO5-L → DIVERGING: Align loop chain for ${label}`);
+        pushSwitchAction('SW-5TO4-L', 'diverging', `Set SW-5TO4-L → DIVERGING: Complete route for ${label} toward Sealdah`);
+      }
     }
   });
 
@@ -1883,14 +1825,6 @@ export default function TrackDiagram() {
   });
   const [selectedHaltTicks, setSelectedHaltTicks] = useState<number>(0);
   const [alerts, setAlerts] = useState<AlertMsg[]>([]);
-
-  // Manual vs AI Optimization live stats (throughput / avg delay / trains passed)
-  const [manualOptStats, setManualOptStats] = useState<OptimizationStats>(() => loadOptStats(MANUAL_STATS_KEY));
-  const [aiOptStats, setAiOptStats] = useState<OptimizationStats>(() => loadOptStats(AI_STATS_KEY));
-  const pendingCompletionsRef = useRef<{ manual: { count: number; delayTicks: number }; ai: { count: number; delayTicks: number } }>({
-    manual: { count: 0, delayTicks: 0 },
-    ai: { count: 0, delayTicks: 0 },
-  });
   
   // AI State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -1903,6 +1837,10 @@ export default function TrackDiagram() {
   const [isReleaseModalOpen, setIsReleaseModalOpen] = useState(false);
   const [releaseKeyInput, setReleaseKeyInput] = useState("");
   const [releaseError, setReleaseError] = useState("");
+
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteKeyInput, setDeleteKeyInput] = useState("");
+  const [deleteError, setDeleteError] = useState("");
 
   // UI State
   const [activeDisruptions, setActiveDisruptions] = useState<any[]>(() => {
@@ -2018,16 +1956,17 @@ export default function TrackDiagram() {
 
     // ── Sealdah UP corridor routing ──────────────────────────────────────────
     // MAIN corridor (Dankuni/Ranaghat/Krishnanagar/Shantipur/Lalgola/Kalyani
-    // Simanta/Naihati/Jangipur Road/Gede): PF1 (UP SUBURBAN) or PF3 (UP MAIN);
-    // non-stop services (mostly Express, which don't halt at any platform)
-    // may additionally/instead run via UP CCR (Track 4, no platform).
+    // Simanta/Naihati/Jangipur Road/Gede): dispatches from PF1 (UP SUBURBAN)
+    // or PF3 (UP MAIN); non-stop/express services may additionally run via
+    // UP CCR (Track 4, no platform).
     // BONGAON corridor (Bongaon/Barasat/Duttapukur/Thakurnagar/Madhyamgram/
-    // Habra/Dum Dum Cantt/Gobardanga/Hasnabad): UP BONGAON (Track 10), reached
-    // either by laddering across from PF1/PF3 or via UP CCR → PF4 → the ladder
-    // (see the AI ladder-routing logic in analyzeRailwayState).
+    // Habra/Dum Dum Cantt/Hasnabad/Gobardanga): also dispatches from PF1,
+    // PF3, or UP CCR — it is then physically diverted onto UP BONGAON
+    // (Track 10) via the switch ladder / loop chain once running
+    // (see STEP 0D "SEALDAH CORRIDOR DIRECTIONAL ROUTING" below).
     if (fromSealdah) {
       const corridor = classifySealdahUpCorridor(train.name);
-      if (corridor === 'BONGAON') return [10];
+      if (corridor === 'BONGAON') return [1, 3, 4];
       if (corridor === 'MAIN') return isExpress ? [1, 3, 4] : [1, 3];
     }
 
@@ -2039,14 +1978,12 @@ export default function TrackDiagram() {
     const fromOutside1 = SEALDAH_MAIN_LINE_CITIES.some(place => n.startsWith(place));
     const fromOutside2 = SEALDAH_BONGAON_LINE_CITIES.some(place => n.startsWith(place));
 
-    // DOWN arrivals into Sealdah:
-    //   MAIN corridor    → DN SUBURBAN (Track 2, straight into PF2) or DN CCR
-    //                      (Track 7, laddered across to PF2 — see the AI
-    //                      ladder-routing logic in analyzeRailwayState).
-    //   BONGAON corridor → DN BONGAON (Track 9 = PF5) or, once diverted,
-    //                      Track 8 = PF4.
-    if (fromOutside1 && toSealdah) return [2, 7];      // DN SUBURBAN / DN CCR → PF2
-    if (fromOutside2 && toSealdah) return [9, 8];      // PF5 (DN BONGAON) / PF4
+    // MAIN corridor DOWN arrivals only ever come via DN SUBURBAN (Track 2,
+    // straight into PF2) or DN CCR (Track 7, ladder-diverted into PF2).
+    if (fromOutside1 && toSealdah) return [2, 7];
+    // BONGAON corridor DOWN arrivals come off DN BONGAON (Track 9 / PF5)
+    // and are diverted onward to DN MAIN (Track 8 / PF4) when needed.
+    if (fromOutside2 && toSealdah) return [9, 8];
 
     if (fromSealdah) return [1, 3];
     if (toSealdah) return [2, 7, 8, 9];
@@ -2116,64 +2053,6 @@ export default function TrackDiagram() {
     localStorage.setItem('railoptima_live_stats', JSON.stringify(stats));
   }, [trains]);
 
-  // Persist manual / AI optimization stats
-  useEffect(() => {
-    localStorage.setItem(MANUAL_STATS_KEY, JSON.stringify(manualOptStats));
-  }, [manualOptStats]);
-  useEffect(() => {
-    localStorage.setItem(AI_STATS_KEY, JSON.stringify(aiOptStats));
-  }, [aiOptStats]);
-
-  // Listen for a reset request coming from the AI Optimization tab
-  useEffect(() => {
-    const handleReset = () => {
-      setManualOptStats(DEFAULT_OPT_STATS());
-      setAiOptStats(DEFAULT_OPT_STATS());
-    };
-    window.addEventListener(RESET_EVENT, handleReset);
-    return () => window.removeEventListener(RESET_EVENT, handleReset);
-  }, []);
-
-  // Derive the Manual vs AI comparison consumed by the AI Optimization tab.
-  // Throughput = trains passed / elapsed hours. Avg delay = mean delay (mins)
-  // across completed trains. AI figures are floored so that, once the AI mode
-  // has actually been used, its efficiency metrics never read worse than the
-  // manual baseline captured from the same interlocking session.
-  useEffect(() => {
-    const computeDerived = (s: OptimizationStats) => {
-      const elapsedHours = Math.max(Date.now() - s.sessionStartAt, 60000) / 3600000;
-      const throughput = s.passed / elapsedHours;
-      const avgDelay = s.passed > 0 ? (s.totalDelayTicks / 20) / s.passed : 0;
-      return { throughput, avgDelay, trainsPassed: s.passed, dispatched: s.dispatched };
-    };
-
-    const manualRaw = computeDerived(manualOptStats);
-    const aiRaw = computeDerived(aiOptStats);
-    const manualActive = manualOptStats.dispatched > 0;
-    const aiActive = aiOptStats.dispatched > 0;
-
-    let aiDisplay = { ...aiRaw };
-    if (aiActive && manualActive) {
-      const minThroughput = manualRaw.throughput * 1.15;
-      const maxDelay = manualRaw.avgDelay * 0.75;
-      aiDisplay = {
-        ...aiRaw,
-        throughput: Math.max(aiRaw.throughput, minThroughput),
-        avgDelay: Math.min(aiRaw.avgDelay, maxDelay),
-        trainsPassed: Math.max(aiRaw.trainsPassed, manualRaw.trainsPassed),
-      };
-    }
-
-    const comparison = {
-      manual: { ...manualRaw, active: manualActive },
-      ai: { ...aiDisplay, active: aiActive },
-      updatedAt: Date.now(),
-    };
-    try {
-      localStorage.setItem(COMPARISON_KEY, JSON.stringify(comparison));
-    } catch (_) {}
-  }, [manualOptStats, aiOptStats]);
-
   // Refs for game loop
   const signalsRef = useRef(signals);
   const switchesRef = useRef(switches);
@@ -2242,19 +2121,30 @@ export default function TrackDiagram() {
     });
   };
 
+  // Wipes every currently-running train off the board. Gated by the
+  // password-entry modal (see isDeleteModalOpen) — only called after the
+  // correct key has been verified.
+  const deleteAllOngoingTrains = () => {
+    setTrains(currentTrains => {
+      const removedCount = currentTrains.length;
+      if (removedCount > 0) {
+        setTimeout(() => {
+          addAlert(`Deleted ${removedCount} ongoing train(s) from the board.`, "warning");
+        }, 100);
+      } else {
+        setTimeout(() => {
+          addAlert(`No ongoing trains to delete.`, "info");
+        }, 100);
+      }
+      return [];
+    });
+    localStorage.setItem('railoptima_trains_v2', JSON.stringify([]));
+  };
+
   // --- Clock ---
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
-  }, []);
-
-  // Records a train that just finished its run (left the network) against the
-  // manual/AI bucket it was dispatched under. Called from inside the train
-  // movement map() below — writes to a ref only, state is flushed after.
-  const recordTrainCompletion = useCallback((train: Train, delayTicks: number) => {
-    const bucket = train.dispatchMethod === 'ai' ? 'ai' : 'manual';
-    pendingCompletionsRef.current[bucket].count += 1;
-    pendingCompletionsRef.current[bucket].delayTicks += delayTicks || 0;
   }, []);
 
   // --- Game Loop (Train Movement) ---
@@ -2740,19 +2630,12 @@ export default function TrackDiagram() {
           const tEndX = currTrack?.endX ?? 2500;
           if (train.direction === 'up') {
             newX += currentSpeed;
-            if (newX > 2950) {
-              recordTrainCompletion(train, newDelayTicks);
-              return null; // Remove if off end
-            }
+            if (newX > 2950) return null; // Remove if off end
           } else {
             newX -= currentSpeed;
-            if (newX < 50) {
-              recordTrainCompletion(train, newDelayTicks);
-              return null; // Remove if off start
-            }
+            if (newX < 50) return null; // Remove if off start
             // Automatically remove train if it is at the end of track 9
             if (newTrackId === 9 && newX < 765) {
-              recordTrainCompletion(train, newDelayTicks);
               return null; // Remove from active trains
             }
           }
@@ -2791,35 +2674,10 @@ export default function TrackDiagram() {
           return { ...train, x: newX, y: newY, trackId: newTrackId, speed: currentSpeed, delayTicks: newDelayTicks, haltRemainingTicks: newHaltRemaining, hasHalted: newHasHalted, hasRequestedClearance: newRequestedClearance, pathHistory: prunedHistory };
         }).filter(Boolean) as Train[];
       });
-
-      // Flush any trains that completed their run this tick into the
-      // manual/AI stats used by the AI Optimization comparison tab.
-      const pending = pendingCompletionsRef.current;
-      if (pending.manual.count > 0) {
-        const { count, delayTicks } = pending.manual;
-        setManualOptStats(prev => ({
-          ...prev,
-          passed: prev.passed + count,
-          totalDelayTicks: prev.totalDelayTicks + delayTicks,
-          lastUpdateAt: Date.now(),
-        }));
-      }
-      if (pending.ai.count > 0) {
-        const { count, delayTicks } = pending.ai;
-        setAiOptStats(prev => ({
-          ...prev,
-          passed: prev.passed + count,
-          totalDelayTicks: prev.totalDelayTicks + delayTicks,
-          lastUpdateAt: Date.now(),
-        }));
-      }
-      if (pending.manual.count > 0 || pending.ai.count > 0) {
-        pendingCompletionsRef.current = { manual: { count: 0, delayTicks: 0 }, ai: { count: 0, delayTicks: 0 } };
-      }
     }, 50); // ~20fps
 
     return () => clearInterval(interval);
-  }, [addAlert, recordTrainCompletion]);
+  }, [addAlert]);
 
   // --- Auto-Release Switches on Train Clearance ---
   useEffect(() => {
@@ -3191,9 +3049,18 @@ export default function TrackDiagram() {
             const trainInPlatform = trains.some(t => t.trackId === 1 && t.x >= 1180 && t.x <= 1625);
             if (trainInPlatform) forceRed = true;
           }
-          if (sig.id.startsWith('2-S3')) {
-            const trainInPlatform = trains.some(t => t.trackId === 2 && t.x <= 1430 && t.x >= 985);
-            if (trainInPlatform) forceRed = true;
+          if (sig.id.startsWith('2-S2')) {
+            // Signal 2-S2 protects entry into the Platform 2 section. It must
+            // only go RED once a train has actually crossed this signal's
+            // own post (x <= sig.x, since 'down' direction travels with
+            // decreasing x) — not the instant a train enters the wider
+            // approach zone while still short of the signal. Before that
+            // point, the aspect cascade below correctly shows double-yellow
+            // (next signal green) as the train approaches.
+            const trainCrossedSignal = trains.some(
+              t => t.trackId === 2 && t.x <= sig.x && t.x >= 985
+            );
+            if (trainCrossedSignal) forceRed = true;
           }
 
           if (forceRed || isBlockedBySwitch || isOccupiedByTrain) {
@@ -3386,7 +3253,7 @@ export default function TrackDiagram() {
     });
   };
 
-  const allocateAndDispatch = (trainNo: string, trackId: number, haltDurationTicks: number = 0, forcedDirection?: Direction, dispatchMethod: 'manual' | 'ai' = 'manual') => {
+  const allocateAndDispatch = (trainNo: string, trackId: number, haltDurationTicks: number = 0, forcedDirection?: Direction) => {
     let liveTrain = TRAIN_DATA.find(t => t.no === trainNo);
     if (!liveTrain) {
       const dynamicFreights = getDynamicFreightTrains(time);
@@ -3452,28 +3319,12 @@ export default function TrackDiagram() {
       haltDurationTicks: finalHaltDurationTicks,
       haltRemainingTicks: finalHaltDurationTicks,
       hasHalted: false,
-      pathHistory: initialHistory,
-      dispatchMethod,
-      dispatchedAt: Date.now(),
+      pathHistory: initialHistory
     };
     
     setTrains(prev => [...prev, newTrain]);
     
     setDispatchedTrainNos(prev => new Set(prev).add(liveTrain.no));
-
-    // Record this dispatch event against the correct manual/AI session so the
-    // AI Optimization tab can show live throughput / delay / trains-passed data.
-    const bumpStats = (prev: OptimizationStats): OptimizationStats => ({
-      ...prev,
-      dispatched: prev.dispatched + 1,
-      sessionStartAt: prev.dispatched === 0 ? Date.now() : prev.sessionStartAt,
-      lastUpdateAt: Date.now(),
-    });
-    if (dispatchMethod === 'ai') {
-      setAiOptStats(bumpStats);
-    } else {
-      setManualOptStats(bumpStats);
-    }
   };
 
    const runAIOptimization = async () => {
@@ -3620,7 +3471,7 @@ export default function TrackDiagram() {
           );
           return;
         }
-        allocateAndDispatch(trainNo, trackId, 600, undefined, 'ai');
+        allocateAndDispatch(trainNo, trackId, 600);
         addAlert(
           `AI Dispatched: Train ${trainNo} → ${track.name}`,
           'info'
@@ -3738,6 +3589,19 @@ export default function TrackDiagram() {
           >
             {isAnalyzing ? <Clock className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />}
             {isAnalyzing ? 'ANALYZING...' : 'AI OPTIMIZATION'}
+          </button>
+
+          <button
+            onClick={() => {
+              setDeleteKeyInput("");
+              setDeleteError("");
+              setIsDeleteModalOpen(true);
+            }}
+            className="flex items-center gap-2 px-4 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/50 rounded text-red-400 text-sm font-bold transition-all"
+            title="Delete all ongoing trains (password protected)"
+          >
+            <Trash2 className="h-4 w-4" />
+            DELETE ALL TRAINS
           </button>
           
           <div className="flex items-center gap-2 text-xl font-bold text-slate-200 bg-[#111] px-4 py-1 rounded border border-slate-800">
@@ -4263,7 +4127,7 @@ export default function TrackDiagram() {
             </span>
             {rec.clear && !rec.blockingSwitch && (
               <button
-                onClick={() => allocateAndDispatch(rec.train.no, rec.trackId, 600, undefined, 'ai')}
+                onClick={() => allocateAndDispatch(rec.train.no, rec.trackId, 600)}
                 style={{
                   fontSize: 10, fontWeight: 700, color: '#fff',
                   background: '#9333ea', border: 'none', borderRadius: 4,
@@ -4408,6 +4272,69 @@ export default function TrackDiagram() {
                   className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
                 >
                   Activate
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDeleteModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-red-500/30 p-6 rounded-lg max-w-md w-full shadow-[0_0_50px_rgba(239,68,68,0.15)] animate-in fade-in zoom-in-95 duration-150">
+            <h3 className="text-lg font-bold tracking-wider text-red-500 mb-2">DELETE ALL ONGOING TRAINS</h3>
+            <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+              This will immediately remove every train currently running on the board. This cannot be undone. Enter the authorization key to continue.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-1">AUTHORIZATION KEY</label>
+                <input
+                  type="password"
+                  value={deleteKeyInput}
+                  onChange={(e) => {
+                    setDeleteKeyInput(e.target.value);
+                    setDeleteError("");
+                  }}
+                  placeholder="Enter authorization key..."
+                  className="w-full bg-[#111] border border-slate-800 focus:border-red-500 rounded px-3 py-2 text-sm text-slate-200 font-mono tracking-widest outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      if (deleteKeyInput === "0000") {
+                        deleteAllOngoingTrains();
+                        setIsDeleteModalOpen(false);
+                      } else {
+                        setDeleteError("Invalid authorization key.");
+                      }
+                    }
+                  }}
+                  autoFocus
+                />
+                {deleteError && (
+                  <p className="text-red-500 text-[10px] font-bold uppercase tracking-wider mt-1">{deleteError}</p>
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setIsDeleteModalOpen(false)}
+                  className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (deleteKeyInput === "0000") {
+                      deleteAllOngoingTrains();
+                      setIsDeleteModalOpen(false);
+                    } else {
+                      setDeleteError("Invalid authorization key.");
+                    }
+                  }}
+                  className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  Delete All
                 </button>
               </div>
             </div>
